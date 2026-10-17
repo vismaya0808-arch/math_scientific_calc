@@ -1,18 +1,23 @@
 """
-MathPilot — Scientific Learning Studio (redesigned UI/UX)
+MathPilot — Scientific Learning Studio (redesigned UI/UX + feature pack)
 
 Run:
     pip install streamlit sympy numpy pandas plotly
     streamlit run app.py
 
+Files (keep them in the same folder):
+    app.py                  this file
+    mathpilot_features.py   visual explainer, step solver, adaptive practice, offline mentor,
+                            equation-to-graph, snap-to-solve, exam mode (SQLite progress)
+
 Put the provided config.toml in  .streamlit/config.toml  for the matching dark theme.
 Optional LLM tutor: pip install openai, then set OPENAI_API_KEY in .streamlit/secrets.toml.
+Optional Snap-to-Solve OCR: pip install pix2tex   (or pytesseract + the Tesseract binary).
 """
 from __future__ import annotations
 
 import ast
 import math
-import random
 import re
 from datetime import datetime
 
@@ -21,6 +26,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import sympy as sp
+
+import mathpilot_features as F
+from mathpilot_features import local_tutor  # structured, fully offline tutor
 
 st.set_page_config(page_title="MathPilot", page_icon="🧭", layout="wide", initial_sidebar_state="expanded")
 
@@ -117,12 +125,18 @@ code,pre{font-family:'IBM Plex Mono',monospace !important;}
 PAGES = {
     "Overview": ("🏠", "Overview", "Your learning workspace at a glance."),
     "AI Math Copilot": ("💬", "AI Math Copilot", "Ask in plain language and get a structured explanation."),
+    "Offline Math Mentor": ("🎓", "Offline Math Mentor", "Concepts, worked examples and hints with no internet."),
     "Scientific Calculator": ("🧮", "Scientific Calculator", "Keypad or keyboard, with real degree and radian modes."),
+    "Visual Explainer": ("🔭", "Visual Math Explainer", "Watch a function, its tangent and its derivative move together."),
+    "Step-by-Step Solver": ("🪜", "Step-by-Step Solver", "Worked solutions with factoring, zero-product rule and verification."),
     "Symbolic Solver": ("∫", "Symbolic Solver", "Exact calculus and algebra powered by SymPy."),
+    "Equation-to-Graph Lab": ("📐", "Equation-to-Graph Lab", "Graph, roots, turning points and numerical root finding."),
     "Graphing Lab": ("📈", "Graphing Lab", "Plot up to three functions and find roots."),
+    "Snap-to-Solve": ("📷", "Snap-to-Solve", "Photograph an equation, correct it, solve it."),
     "Matrix Lab": ("▦", "Matrix Lab", "Arithmetic, determinants, inverses and eigenvalues."),
     "Statistics Lab": ("📊", "Statistics Lab", "Summarise a dataset and see its distribution."),
-    "Practice Arena": ("🎯", "Practice Arena", "Topic-based questions with instant feedback."),
+    "Practice Arena": ("🎯", "Adaptive Practice", "Questions that adapt to your weak topics, with a mastery map."),
+    "Exam Mode": ("📝", "Exam Mode", "Timed papers, negative marking, reports and saved progress."),
     "Calculator Handbook": ("📚", "Calculator Handbook", "Quick reference for common calculator keys."),
     "Session Insights": ("🧠", "Session Insights", "Review your activity and get next steps."),
 }
@@ -130,9 +144,9 @@ PAGES = {
 def init_state():
     defaults = {
         "page": "Overview", "history": [], "quiz_score": 0, "quiz_attempts": 0, "quiz_streak": 0,
-        "best_streak": 0, "quiz_question": None, "quiz_feedback": None, "quiz_qid": 0, "chat": [],
+        "best_streak": 0, "chat": [],
         "session_started": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "calc_expr": "", "calc_out": None, "ans": 0, "angle_mode": "Degrees", "quiz_topic": "All topics",
+        "calc_expr": "", "calc_out": None, "ans": 0, "angle_mode": "Degrees",
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
@@ -140,7 +154,7 @@ def init_state():
 init_state()
 
 def goto(page):
-       st.session_state.page = page
+    st.session_state.page = page
 
 def page_header(page):
     icon, title, sub = PAGES[page]
@@ -268,71 +282,8 @@ def symbolic_steps(expr, operation, point=None):
         raise ValueError("Unknown operation.")
     return out, steps
 
-# ============================ Practice bank ============================
-QUIZ_BANK = [
-    {"topic": "Trigonometry", "q": "In degree mode, what is sin(30°)?", "opts": ["0", "0.5", "1", "√3/2"], "answer": 1, "why": "sin(30°) = opposite/hypotenuse = 1/2."},
-    {"topic": "Logarithms", "q": "What is log₁₀(1000)?", "opts": ["2", "3", "10", "100"], "answer": 1, "why": "10³ = 1000, so log₁₀(1000) = 3."},
-    {"topic": "Calculus", "q": "If f(x) = x³, what is f'(x)?", "opts": ["x²", "2x", "3x²", "3x"], "answer": 2, "why": "Power rule: d(xⁿ)/dx = n·xⁿ⁻¹."},
-    {"topic": "Matrices", "q": "For A = [[1,2],[3,4]], what is det(A)?", "opts": ["2", "-2", "10", "-10"], "answer": 1, "why": "det(A) = ad − bc = 1×4 − 2×3 = −2."},
-    {"topic": "Probability", "q": "How many ways can 2 students be chosen from 5 if order does not matter?", "opts": ["10", "20", "25", "60"], "answer": 0, "why": "5C2 = 5!/(2!·3!) = 10."},
-    {"topic": "Complex Numbers", "q": "What is i²?", "opts": ["1", "i", "-1", "-i"], "answer": 2, "why": "The imaginary unit is defined by i² = −1."},
-    {"topic": "Number Systems", "q": "What is binary 1010 in decimal?", "opts": ["8", "9", "10", "12"], "answer": 2, "why": "1010₂ = 8 + 0 + 2 + 0 = 10."},
-    {"topic": "Statistics", "q": "What is the mean of 2, 4, 6, 8?", "opts": ["4", "5", "6", "20"], "answer": 1, "why": "(2+4+6+8)/4 = 5."},
-    {"topic": "Roots", "q": "What is the principal square root of 144?", "opts": ["-12 only", "12", "72", "24"], "answer": 1, "why": "The principal root is non-negative: √144 = 12."},
-    {"topic": "Equations", "q": "What are the roots of x² − 5x + 6 = 0?", "opts": ["1 and 6", "2 and 3", "-2 and -3", "0 and 5"], "answer": 1, "why": "(x−2)(x−3) = 0, so x = 2 or 3."},
-    {"topic": "Calculus", "q": "What is ∫2x dx?", "opts": ["2 + C", "x² + C", "2x² + C", "x + C"], "answer": 1, "why": "Reverse power rule: ∫2x dx = x² + C."},
-    {"topic": "Vectors", "q": "What is the dot product of (1,2) and (3,4)?", "opts": ["7", "10", "11", "14"], "answer": 2, "why": "1×3 + 2×4 = 11."},
-]
-
-def new_question():
-    topic = st.session_state.quiz_topic
-    pool = [q for q in QUIZ_BANK if topic == "All topics" or q["topic"] == topic] or QUIZ_BANK
-    current = st.session_state.quiz_question
-    choices = [q for q in pool if q is not current] or pool
-    st.session_state.quiz_question = random.choice(choices)
-    st.session_state.quiz_feedback = None
-    st.session_state.quiz_qid += 1
-
-def submit_answer():
-    q = st.session_state.quiz_question
-    choice = st.session_state.get(f"quiz_choice_{st.session_state.quiz_qid}")
-    if st.session_state.quiz_feedback is not None or choice is None:
-        return
-    st.session_state.quiz_attempts += 1
-    correct = q["opts"].index(choice) == q["answer"]
-    if correct:
-        st.session_state.quiz_score += 1
-        st.session_state.quiz_streak += 1
-        st.session_state.best_streak = max(st.session_state.best_streak, st.session_state.quiz_streak)
-    else:
-        st.session_state.quiz_streak = 0
-    st.session_state.quiz_feedback = ("correct" if correct else "incorrect", q["why"])
-
 # ============================ Tutor ============================
-def local_tutor(question):
-    q = question.lower().strip()
-    topics = {
-        "sin": ("Sine", "In a right triangle, sin(θ) = opposite / hypotenuse. Check whether your calculator is in DEG or RAD mode before entering the angle.", "Try `sin(30)` in degree mode → 0.5"),
-        "cos": ("Cosine", "cos(θ) = adjacent / hypotenuse. In degree mode, cos(60°) = 0.5.", "Try `cos(60)` → 0.5"),
-        "tan": ("Tangent", "tan(θ) = opposite / adjacent = sin(θ)/cos(θ). It is undefined where cos(θ) = 0, such as 90° + k·180°.", "Try `tan(45)` → 1"),
-        "log": ("Logarithms", "log₁₀(x) is the power of 10 that gives x. Since 10³ = 1000, log₁₀(1000) = 3. The input must be positive.", "Try `log(1000)` → 3"),
-        "matrix": ("Matrices", "For A = [[a,b],[c,d]], det(A) = ad − bc. A square matrix has an inverse only when its determinant is non-zero.", "Open the Matrix Lab to compute determinants and inverses."),
-        "determinant": ("Determinants", "For A = [[a,b],[c,d]], det(A) = ad − bc. A determinant of zero means the matrix is singular (no inverse).", "Open the Matrix Lab and choose det(A)."),
-        "derivative": ("Derivatives", "A derivative measures instantaneous rate of change. The power rule is d(xⁿ)/dx = n·xⁿ⁻¹.", "Differentiate `x**3` in the Symbolic Solver."),
-        "integral": ("Integration", "An indefinite integral gives a family of antiderivatives (+ C). A definite integral gives the net signed area between two bounds.", "Integrate `x**2` in the Symbolic Solver."),
-        "alpha": ("ALPHA key", "On many Casio scientific calculators, ALPHA selects the secondary labels printed near keys. Exact mappings differ by model, so check your manual.", "Tell me your calculator model for exact key sequences."),
-        "rad": ("DEG and RAD", "DEG measures angles in degrees, RAD in radians (π rad = 180°). Always check the mode before using trig functions.", "In the Scientific Calculator, switch the angle mode and compare `sin(30)`."),
-        "quadratic": ("Quadratic equations", "For ax² + bx + c = 0, x = (−b ± √(b² − 4ac)) / 2a. The discriminant b² − 4ac tells you whether the roots are real or complex.", "Solve `x**2 - 5*x + 6 = 0` in the Symbolic Solver."),
-    }
-    for key, (title, text, nxt) in topics.items():
-        if key in q:
-            return f"### {title}\n\n{text}\n\n**Next step:** {nxt}"
-    if re.match(r"^(hello|hi|hey)\b", q):
-        return "### Welcome\n\nAsk about a calculator key, a concept or a worked problem. I can also point you to the right lab."
-    return ("### I can help with common topics\n\nThe built-in tutor works offline and covers a limited set of topics. "
-            "Try asking about **sin, log, matrices, derivatives, integrals, quadratic equations, or DEG vs RAD**. "
-            "For exact answers, use the **Symbolic Solver**.")
-
+# local_tutor() is imported from mathpilot_features (offline, rule-based, topic-specific).
 def tutor_response(question):
     try:
         api_key = st.secrets.get("OPENAI_API_KEY", "")
@@ -382,8 +333,8 @@ page = st.session_state.page
 # ============================ Overview ============================
 if page == "Overview":
     st.markdown("""<div class="mp-hero"><h1>From button memorising to real understanding</h1>
-    <p>Calculate, visualise, practise and review in one place. Start with the calculator, ask the copilot a question,
-    or test yourself in the Practice Arena.</p></div>""", unsafe_allow_html=True)
+    <p>Calculate, visualise, practise and review in one place. Start with the calculator, watch a derivative come to life,
+    follow a worked solution, or sit a timed exam. Your practice and exam progress is saved on this machine.</p></div>""", unsafe_allow_html=True)
     attempts = st.session_state.quiz_attempts
     acc = 100 * st.session_state.quiz_score / attempts if attempts else 0
     c1, c2, c3, c4 = st.columns(4)
@@ -394,10 +345,13 @@ if page == "Overview":
     st.markdown("#### Jump into a workspace")
     cards = [("💬", "AI Math Copilot", "Ask questions and get structured explanations."),
              ("🧮", "Scientific Calculator", "Keypad with degree and radian modes."),
-             ("∫", "Symbolic Solver", "Differentiate, integrate, factor and solve."),
-             ("📈", "Graphing Lab", "Plot functions and find roots."),
-             ("▦", "Matrix Lab", "Determinants, inverses, eigenvalues."),
-             ("🎯", "Practice Arena", "Questions with instant feedback.")]
+             ("🔭", "Visual Explainer", "Move a point and watch the tangent and slope change."),
+             ("🪜", "Step-by-Step Solver", "Factor, apply the zero-product rule and verify."),
+             ("📐", "Equation-to-Graph Lab", "Roots, turning points and numerical solving."),
+             ("📷", "Snap-to-Solve", "Photograph an equation and solve it."),
+             ("🎓", "Offline Math Mentor", "Concepts, examples and hints, no internet needed."),
+             ("🎯", "Practice Arena", "Adaptive questions and a topic mastery map."),
+             ("📝", "Exam Mode", "Timed papers, negative marking and reports.")]
     cols = st.columns(3)
     for i, (icon, title, desc) in enumerate(cards):
         with cols[i % 3]:
@@ -426,6 +380,11 @@ elif page == "AI Math Copilot":
             st.markdown(msg["content"])
     if st.session_state.chat:
         st.button("Clear conversation", on_click=lambda: st.session_state.update(chat=[]))
+
+# ============================ Offline mentor ============================
+elif page == "Offline Math Mentor":
+    page_header(page)
+    F.render_offline_mentor()
 
 # ============================ Calculator ============================
 elif page == "Scientific Calculator":
@@ -471,6 +430,16 @@ elif page == "Scientific Calculator":
         else:
             st.info("No calculations yet. Press a key or pick an example to begin.")
 
+# ============================ Visual explainer ============================
+elif page == "Visual Explainer":
+    page_header(page)
+    F.render_visual_explainer()
+
+# ============================ Step-by-step solver ============================
+elif page == "Step-by-Step Solver":
+    page_header(page)
+    F.render_step_solver()
+
 # ============================ Symbolic ============================
 elif page == "Symbolic Solver":
     page_header(page)
@@ -504,7 +473,8 @@ elif page == "Symbolic Solver":
                 if sols:
                     for i, s in enumerate(sols, 1):
                         st.latex(f"x_{{{i}}} = {sp.latex(s)}")
-                    st.caption(f"{len(sols)} solution(s). Check domain restrictions for logs, denominators and radicals.")
+                    st.caption(f"{len(sols)} solution(s). Check domain restrictions for logs, denominators and radicals. "
+                               "For a full worked solution, use the Step-by-Step Solver.")
                 else:
                     st.warning("No solution found in the supported domain.")
             except Exception as exc:
@@ -521,6 +491,11 @@ elif page == "Symbolic Solver":
                 m2.metric("Exact form", sp.sstr(exact))
             except Exception as exc:
                 st.error(f"Verification failed: {exc}")
+
+# ============================ Equation-to-graph ============================
+elif page == "Equation-to-Graph Lab":
+    page_header(page)
+    F.render_equation_graph()
 
 # ============================ Graphing ============================
 elif page == "Graphing Lab":
@@ -569,7 +544,13 @@ elif page == "Graphing Lab":
         st.plotly_chart(style_fig(fig, 520), use_container_width=True)
         for n in notes:
             st.markdown(n)
-        st.caption("Roots appear only when SymPy can solve them exactly; this is not a full numerical root finder.")
+        st.caption("Roots appear only when SymPy can solve them exactly. For numerical root finding, "
+                   "turning points and intercepts, open the Equation-to-Graph Lab.")
+
+# ============================ Snap-to-solve ============================
+elif page == "Snap-to-Solve":
+    page_header(page)
+    F.render_snap_to_solve()
 
 # ============================ Matrix ============================
 elif page == "Matrix Lab":
@@ -641,33 +622,15 @@ elif page == "Statistics Lab":
         except Exception as exc:
             st.error(f"Could not analyse the dataset: {exc}")
 
-# ============================ Practice ============================
+# ============================ Practice (adaptive) ============================
 elif page == "Practice Arena":
     page_header(page)
-    if st.session_state.quiz_question is None:
-        new_question()
-    attempts = st.session_state.quiz_attempts
-    acc = 100 * st.session_state.quiz_score / attempts if attempts else 0
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Correct", st.session_state.quiz_score); m2.metric("Attempted", attempts)
-    m3.metric("Accuracy", f"{acc:.0f}%" if attempts else "–"); m4.metric("Current streak", st.session_state.quiz_streak)
-    st.write("")
-    st.selectbox("Topic", ["All topics"] + sorted({q["topic"] for q in QUIZ_BANK}), key="quiz_topic", on_change=new_question)
-    q = st.session_state.quiz_question
-    st.markdown(f'<div class="mp-card"><span class="mp-chip">{q["topic"]}</span><h3>{q["q"]}</h3></div>', unsafe_allow_html=True)
-    answered = st.session_state.quiz_feedback is not None
-    st.radio("Your answer", q["opts"], index=None, key=f"quiz_choice_{st.session_state.quiz_qid}", disabled=answered)
-    b1, b2 = st.columns(2)
-    if not answered:
-        b1.button("Check answer", on_click=submit_answer, type="primary", use_container_width=True)
-    else:
-        b2.button("Next question", on_click=new_question, type="primary", use_container_width=True)
-    if answered:
-        status, why = st.session_state.quiz_feedback
-        (st.success if status == "correct" else st.error)(
-            "Correct. Nice work." if status == "correct" else f"Not quite. The correct answer is {q['opts'][q['answer']]}.")
-        st.info(why)
-    st.caption("Tip: try without notes first, then explain to yourself why the answer works.")
+    F.render_adaptive_practice()
+
+# ============================ Exam mode ============================
+elif page == "Exam Mode":
+    page_header(page)
+    F.render_exam_mode()
 
 # ============================ Handbook ============================
 elif page == "Calculator Handbook":
@@ -709,11 +672,21 @@ elif page == "Session Insights":
         st.download_button("Download history (CSV)", df.to_csv(index=False).encode("utf-8"), "mathpilot_history.csv", "text/csv")
     else:
         st.info("No calculations yet. Open the Scientific Calculator to get started.")
+    st.markdown("#### Saved topic progress")
+    topic_df = F.topic_stats()
+    if topic_df["Attempts"].sum() == 0:
+        st.info("No saved practice or exam answers yet. Try the Practice Arena or Exam Mode.")
+    else:
+        st.dataframe(topic_df, use_container_width=True, hide_index=True, column_config={
+            "Mastery": st.column_config.ProgressColumn("Mastery", min_value=0, max_value=100, format="%d%%")})
+        weak = topic_df[topic_df.Status == "Revise"]
+        if not weak.empty:
+            st.warning("Revision recommended: " + ", ".join(weak.Topic))
     st.markdown("#### Suggested next step")
     if attempts == 0: st.write("Take a short practice quiz to set your baseline.")
     elif acc < 60: st.write("Review the explanations for questions you missed, then retry the same topic.")
     elif acc < 85: st.write("You have a solid base. Try mixed topics and explain each solution in your own words.")
     else: st.write("Strong accuracy. Move to harder engineering problems and verify results two ways.")
-    st.caption("Progress is stored for this browser session only.")
+    st.caption("Calculation history is kept for this browser session. Practice and exam progress is saved in mathpilot.db.")
 
 st.markdown('<div class="mp-footer">MathPilot · Built with Streamlit, SymPy, NumPy, Pandas and Plotly · Prototype for academic demonstration</div>', unsafe_allow_html=True)
